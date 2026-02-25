@@ -1,8 +1,8 @@
 // ==WindhawkMod==
 // @id              alt-tab-per-monitor
 // @name            Alt+Tab per monitor
-// @description     Pressing Alt+Tab shows all open windows on the primary display. This mod shows only the windows on the monitor where the cursor is.
-// @version         1.1.0
+// @description     Customize Alt+Tab behavior per monitor. By default, shows all windows on primary and only current monitor's windows on side monitors.
+// @version         1.2.0
 // @author          L3r0y
 // @github          https://github.com/L3r0yThingz
 // @include         explorer.exe
@@ -19,9 +19,29 @@ primary display, showing all open windows across all monitors. This mod
 customizes the behavior to display the switcher on the monitor where the cursor
 is currently located, showing only the windows present on that specific monitor.
 
+### Mod Settings (Customize Your Experience)
+You can customize exactly what windows to show on what monitor using the **Settings** tab:
+* **Primary Monitor:** Choose whether to show all windows or only primary monitor windows.
+* **Side Monitors:** Choose whether to show all windows or only the current side monitor windows.
+* **Win+Alt+Tab Shortcut:** Hold the Windows key while pressing Alt+Tab to temporarily **reverse** the two rules above!
+
 ![Gif](https://i.imgur.com/Hpg8TKh.gif)
 */
 // ==/WindhawkModReadme==
+
+// ==WindhawkModSettings==
+/*
+- primary_show_all: true
+  $name: "🖥️ Primary Monitor: Show All Windows"
+  $description: "(ON) Shows ALL open windows on the primary monitor. (OFF) Shows ONLY primary monitor windows."
+- side_show_all: false
+  $name: "💻 Side Monitors: Show All Windows"
+  $description: "(ON) Shows ALL open windows on side monitors. (OFF) Shows ONLY the current side monitor's windows."
+- enable_win_alt_tab_revert: true
+  $name: "🔄 Enable Win+Alt+Tab Revert Shortcut"
+  $description: "(ON) Reverses the above two rules temporarily when holding the Windows key during Alt+Tab."
+*/
+// ==/WindhawkModSettings==
 
 #include <windhawk_utils.h>
 
@@ -35,9 +55,20 @@ enum class WinVersion {
 
 WinVersion g_winVersion;
 
+bool g_primary_show_all = true;
+bool g_side_show_all = false;
+bool g_enable_win_alt_tab_revert = true;
+
+void LoadSettings() {
+    g_primary_show_all = Wh_GetIntSetting(L"primary_show_all");
+    g_side_show_all = Wh_GetIntSetting(L"side_show_all");
+    g_enable_win_alt_tab_revert = Wh_GetIntSetting(L"enable_win_alt_tab_revert");
+}
+
 std::atomic<DWORD> g_threadIdForAltTabShowWindow;
 std::atomic<DWORD> g_lastThreadIdForXamlAltTabViewHost_CreateInstance;
 std::atomic<DWORD> g_threadIdForXamlAltTabViewHost_CreateInstance;
+std::atomic<bool> g_isWinAltTab(false);
 ULONGLONG g_CreateInstance_TickCount;
 constexpr ULONGLONG kDeltaThreshold = 200;
 
@@ -142,17 +173,36 @@ HRESULT GetWindowHandleFromApplicationView(void* applicationView,
     return hr;
 }
 
-bool IsWindowOnCursorMonitor(HWND windowHandle) {
+bool ShouldShowWindow(HWND windowHandle) {
     POINT pt;
     if (!GetCursorPos(&pt)) {
-        return false;
+        return true;
     }
 
-    auto hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-    auto hMonFromWindow =
+    auto hMonCursor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    
+    bool is_reverting = g_isWinAltTab && g_enable_win_alt_tab_revert;
+    bool effective_primary_show_all = is_reverting ? !g_primary_show_all : g_primary_show_all;
+    bool effective_side_show_all = is_reverting ? !g_side_show_all : g_side_show_all;
+
+    MONITORINFO monInfo;
+    monInfo.cbSize = sizeof(MONITORINFO);
+    if (GetMonitorInfo(hMonCursor, &monInfo)) {
+        if (monInfo.dwFlags & MONITORINFOF_PRIMARY) {
+            if (effective_primary_show_all) {
+                return true;
+            }
+        } else {
+            if (effective_side_show_all) {
+                return true;
+            }
+        }
+    }
+
+    auto hMonWindow =
         MonitorFromWindow(windowHandle, MONITOR_DEFAULTTONEAREST);
 
-    return hMon == hMonFromWindow;
+    return hMonCursor == hMonWindow;
 }
 
 using CVirtualDesktop_IsViewVisible_t = HRESULT(WINAPI*)(void* pThis,
@@ -194,7 +244,7 @@ HRESULT WINAPI CVirtualDesktop_IsViewVisible_Hook(void* pThis,
         return ret;
     }
 
-    if (!IsWindowOnCursorMonitor(windowHandle)) {
+    if (!ShouldShowWindow(windowHandle)) {
         *isVisible = FALSE;
     }
 
@@ -211,9 +261,11 @@ HRESULT WINAPI XamlAltTabViewHost_Show_Hook(void* pThis,
                                             int param2,
                                             void* param3) {
     g_threadIdForAltTabShowWindow = GetCurrentThreadId();
+    g_isWinAltTab = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
     HRESULT ret =
         XamlAltTabViewHost_Show_Original(pThis, param1, param2, param3);
     g_threadIdForAltTabShowWindow = 0;
+    g_isWinAltTab = false;
     return ret;
 }
 
@@ -228,8 +280,10 @@ HRESULT WINAPI CAltTabViewHost_Show_Hook(void* pThis,
                                          void* param3) {
     Wh_Log(L">");
     g_threadIdForAltTabShowWindow = GetCurrentThreadId();
+    g_isWinAltTab = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
     HRESULT ret = CAltTabViewHost_Show_Original(pThis, param1, param2, param3);
     g_threadIdForAltTabShowWindow = 0;
+    g_isWinAltTab = false;
     return ret;
 }
 
@@ -299,6 +353,7 @@ HRESULT WINAPI XamlAltTabViewHost_CreateInstance_Hook(void* pThis,
     g_threadIdForXamlAltTabViewHost_CreateInstance = GetCurrentThreadId();
     g_lastThreadIdForXamlAltTabViewHost_CreateInstance = GetCurrentThreadId();
     g_CreateInstance_TickCount = GetTickCount64();
+    g_isWinAltTab = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
     HRESULT ret = XamlAltTabViewHost_CreateInstance_Original(pThis, param1,
                                                              param2, param3);
     g_threadIdForXamlAltTabViewHost_CreateInstance = 0;
@@ -333,6 +388,7 @@ HRESULT WINAPI CAltTabViewHost_CreateInstance_Hook(void* pThis,
     g_threadIdForXamlAltTabViewHost_CreateInstance = GetCurrentThreadId();
     g_lastThreadIdForXamlAltTabViewHost_CreateInstance = GetCurrentThreadId();
     g_CreateInstance_TickCount = GetTickCount64();
+    g_isWinAltTab = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
     HRESULT ret = CAltTabViewHost_CreateInstance_Original(
         pThis, param1, param2, param3, param4, param5, param6, param7, param8,
         param9, param10, param11);
@@ -367,6 +423,7 @@ HRESULT WINAPI CAltTabViewHost_CreateInstance_Win11_Hook(void* pThis,
     g_threadIdForXamlAltTabViewHost_CreateInstance = GetCurrentThreadId();
     g_lastThreadIdForXamlAltTabViewHost_CreateInstance = GetCurrentThreadId();
     g_CreateInstance_TickCount = GetTickCount64();
+    g_isWinAltTab = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
     HRESULT ret = CAltTabViewHost_CreateInstance_Win11_Original(
         pThis, param1, param2, param3, param4, param5, param6, param7, param8,
         param9, param10);
@@ -374,8 +431,14 @@ HRESULT WINAPI CAltTabViewHost_CreateInstance_Win11_Hook(void* pThis,
     return ret;
 }
 
+void Wh_ModSettingsChanged() {
+    LoadSettings();
+}
+
 BOOL Wh_ModInit() {
     Wh_Log(L">");
+
+    LoadSettings();
 
     g_winVersion = GetWindowsVersion();
 
